@@ -1,6 +1,11 @@
 ---
 # Versione principale a cui arrivare (8, 9 o 10). Il ruolo calcola tutti i salti.
+# Nei criteri aziendali "obiettivo" la puo' cambiare per gruppo o per server.
 upgrade_advisor_obiettivo: 10
+
+# File dei criteri aziendali (esclusioni, soglie, controlli propri).
+# Esempio da copiare: esempi/criteri_aziendali.yml
+upgrade_advisor_file_criteri: "{{ playbook_dir }}/criteri_aziendali.yml"
 
 # Dove scrivere i rapporti, sul computer da cui si lancia Ansible.
 upgrade_advisor_cartella_rapporti: "{{ playbook_dir }}/rapporti"

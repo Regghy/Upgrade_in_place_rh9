@@ -1,6 +1,10 @@
 ---
 # Il ruolo non cambia niente sui server: legge, confronta e scrive un rapporto
-# sul computer da cui si lancia Ansible.
+# sul computer da cui si lancia Ansible. Il playbook LeappUpgrade.yaml lo usa
+# come cancello: l'upgrade parte solo sui server con stato "via_libera".
+
+- name: Leggi i criteri aziendali
+  ansible.builtin.import_tasks: criteri.yml
 
 - name: Raccogli i dati del server
   ansible.builtin.import_tasks: raccogli.yml

@@ -39,8 +39,8 @@
 
 - name: Versioni principali presenti fra i server
   ansible.builtin.set_fact:
-    ua_major_presenti: "{{ ansible_play_hosts | map('extract', hostvars, ['ansible_facts', 'distribution_major_version']) | unique | list }}"
-    ua_dal_giorno: "{{ '%Y-%m-%d' | strftime((ansible_facts['date_time']['epoch'] | int) - (upgrade_advisor_giorni_cve | int) * 86400) }}"
+    ua_major_presenti: "{{ ansible_play_hosts | map('extract', hostvars, ['ua_host', 'major']) | map('string') | reject('equalto', '') | unique | list }}"
+    ua_dal_giorno: "{{ '%Y-%m-%d' | strftime((now().timestamp() | int) - (upgrade_advisor_giorni_cve | int) * 86400) }}"
   run_once: true
 
 - name: Scarica le falle pubbliche recenti di Red Hat
@@ -80,7 +80,7 @@
     ua_fonti:
       salti: "{{ 'scaricati ora da GitHub (oamg/leapp-repository)' if (ua_salti_web.status | default(0)) == 200 else 'copia inclusa nel ruolo' }}"
       falle: "{{ ('scaricate ora da Red Hat, dal ' ~ ua_dal_giorno) if (ua_cve | default({}) | length > 0) else 'copia del giro precedente' }}"
-      quando: "{{ ansible_facts['date_time']['iso8601'] }}"
+      quando: "{{ now(utc=true).strftime('%Y-%m-%d %H:%M UTC') }}"
   run_once: true
 
 - name: Salva le falle per il prossimo giro

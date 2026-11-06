@@ -1,0 +1,71 @@
+---
+# Criteri aziendali per l'upgrade in place.
+# Copia questo file nella cartella del progetto come criteri_aziendali.yml
+# e cambialo come serve. Ogni voce e' facoltativa: quello che non scrivi
+# prende il valore di base indicato nei commenti.
+#
+# Ordine: generale < gruppi dell'inventario < server < riga di comando.
+# I "controlli" invece si sommano: valgono quelli generali piu' quelli del
+# gruppo e del server.
+
+generale:
+  obiettivo: 9                    # versione a cui arrivare (base: 10)
+  ram_minima_mb: 4096             # base: il minimo di Red Hat (1536, 3072 su Power)
+  var_minimo_mb: 8192             # base: 5120
+  boot_minimo_mb: 200             # base: 100, il minimo di Leapp
+  ore_validita_preupgrade: 24     # il leapp preupgrade vale per tante ore (base: 24)
+  backup_obbligatorio_per:        # chi deve avere il backup confermato (base: fisico)
+    - fisico
+    - virtuale
+  blocca_aggiornamenti_gravi: true      # blocca se mancano aggiornamenti critici o importanti (base: false)
+  blocca_falle_senza_correzione: false  # blocca se una falla senza correzione tocca il server (base: false)
+  pacchetti_vietati:              # se sono installati, l'upgrade non parte
+    - agente-monitoraggio-vecchio
+  architetture_ammesse: [x86_64]  # base: x86_64, aarch64, ppc64le, s390x
+
+  # Controlli propri dell'azienda: comandi che il ruolo lancia sul server.
+  # Devono solo leggere, mai cambiare qualcosa.
+  # ok_se: rc_zero (base), rc_diverso_da_zero, "contiene: testo", "non_contiene: testo"
+  # blocca: true (base) ferma l'upgrade; false scrive solo un avviso.
+  controlli:
+    - nome: Oracle spento
+      codice: AZ-ORACLE
+      comando: pgrep -f ora_pmon
+      ok_se: rc_diverso_da_zero
+      errore: Il database Oracle e' acceso
+      rimedio: Ferma il database con la procedura interna, poi rilancia il controllo.
+    - nome: Nessun utente collegato
+      comando: who | wc -l
+      ok_se: "contiene: 0"
+      errore: Ci sono utenti collegati al server
+      blocca: false
+
+# Criteri per gruppo dell'inventario (i nomi sono quelli di [gruppo]).
+gruppi:
+  web:
+    obiettivo: 10
+  database:
+    ram_minima_mb: 16384
+    controlli:
+      - nome: Replica ferma
+        comando: systemctl is-active replica.service
+        ok_se: "non_contiene: active"
+        errore: La replica del database e' ancora attiva
+
+# Criteri per server: si possono usare i modelli, come db-* o *-prod.
+server:
+  db-01:
+    backup_confermato: true       # il backup di questa macchina e' stato fatto
+  "*-test":
+    backup_obbligatorio_per: []
+
+# Server da non toccare mai: con il motivo, che finisce nel rapporto.
+escludi:
+  - sap-*
+  - server: legacy01
+    motivo: applicazione certificata solo su RHEL 8
+
+# Gruppi dell'inventario da non toccare.
+escludi_gruppi:
+  - gruppo: cluster
+    motivo: i nodi del cluster si aggiornano a mano, uno alla volta

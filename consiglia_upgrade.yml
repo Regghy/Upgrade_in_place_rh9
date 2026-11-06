@@ -7,6 +7,6 @@
 - name: Consigli per l'upgrade in place di RHEL
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false  # i dati li raccoglie il ruolo, e non sui server esclusi
   roles:
     - upgrade_advisor

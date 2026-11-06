@@ -8,7 +8,7 @@
     ua_esito: >-
       {{ ua_host | combine({'fonti': ua_fonti})
          | consiglia_upgrade(ua_salti, ua_salti7, ua_cve_finali, ua_precedente,
-                             upgrade_advisor_obiettivo, upgrade_advisor_tipo) }}
+                             upgrade_advisor_obiettivo, upgrade_advisor_tipo, ua_criteri) }}
 
 - name: Scrivi il rapporto in JSON
   ansible.builtin.copy:
@@ -41,7 +41,8 @@
 - name: Cosa e' cambiato dal giro precedente
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }}:
+      {{ inventory_hostname }}: {{ ua_esito.stato | upper | replace('_', ' ') }}
+      {%- if ua_esito.blocchi %} ({{ ua_esito.blocchi | map(attribute='codice') | join(', ') }}){% endif %},
       {{ 'la procedura e'' cambiata' if ua_esito.procedura_cambiata else 'procedura uguale' }},
       falle nuove che toccano il server: {{ ua_esito.novita | length }},
       rapporto in {{ upgrade_advisor_cartella_rapporti }}/{{ inventory_hostname }}.md

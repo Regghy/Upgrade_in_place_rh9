@@ -1,0 +1,21 @@
+---
+# I criteri li scrive il tecnico in criteri_aziendali.yml (vedi
+# esempi/criteri_aziendali.yml). Senza file valgono i valori di base.
+
+- name: Leggi il file dei criteri aziendali
+  ansible.builtin.set_fact:
+    ua_file_criteri: >-
+      {{ (lookup('ansible.builtin.file', upgrade_advisor_file_criteri, errors='ignore') | default('', true) | from_yaml)
+         or {} }}
+  run_once: true
+
+- name: Criteri di questo server
+  ansible.builtin.set_fact:
+    ua_criteri: >-
+      {{ ua_file_criteri | criteri_host(inventory_hostname, group_names,
+           ({'backup_confermato': upgrade_backup_confermato | bool} if upgrade_backup_confermato is defined else {})) }}
+
+- name: Server esclusi
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} e' escluso: {{ ua_criteri.motivo_esclusione }}. Non viene toccato."
+  when: ua_criteri.escluso

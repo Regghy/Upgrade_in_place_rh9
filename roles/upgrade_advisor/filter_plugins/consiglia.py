@@ -9,6 +9,7 @@ Gira sul controller Ansible: nessuna dipendenza oltre la libreria standard.
 """
 from __future__ import absolute_import, division, print_function
 
+import fnmatch
 import json
 import re
 
@@ -97,12 +98,14 @@ def _avvisi_sicurezza(righe):
     return out
 
 
-def _blocchi_leapp(report):
-    """Estrae dal leapp-report.json i problemi che bloccano l'upgrade."""
+def _blocchi_leapp(report, con_errori=False):
+    """Estrae dal leapp-report.json i problemi che bloccano l'upgrade
+    (e, con con_errori, anche gli errori dei controlli di Leapp)."""
     out = []
     for e in (report or {}).get("entries", []):
         gruppi = set(e.get("groups", []) or []) | set(e.get("flags", []) or [])
-        if "inhibitor" not in gruppi:
+        errore = con_errori and "error" in gruppi
+        if "inhibitor" not in gruppi and not errore:
             continue
         rimedi = []
         for r in (e.get("detail", {}) or {}).get("remediations", []) or []:
@@ -110,7 +113,8 @@ def _blocchi_leapp(report):
             if isinstance(ctx, list):
                 ctx = " ".join(str(c) for c in ctx)
             rimedi.append({"tipo": r.get("type"), "testo": ctx})
-        out.append({"titolo": e.get("title"), "riassunto": e.get("summary"), "rimedi": rimedi})
+        out.append({"titolo": e.get("title"), "riassunto": e.get("summary"), "rimedi": rimedi,
+                    "errore": "inhibitor" not in gruppi})
     return out
 
 
@@ -173,12 +177,19 @@ def _numero(v):
 
 def _normalizza(host):
     h = dict(host or {})
-    for k in ("fips", "dischi_cifrati", "registrato", "virtuale", "uefi"):
+    for k in ("fips", "dischi_cifrati", "registrato", "virtuale", "uefi", "leapp_installato", "repo_locale"):
         if k in h:
             h[k] = _si_no(h[k])
-    for k in ("var_libero_mb", "boot_libero_mb", "kernel_installati"):
+    for k in ("var_libero_mb", "boot_libero_mb", "kernel_installati", "ram_mb", "report_eta_ore"):
         if k in h:
             h[k] = _numero(h[k])
+    luks = h.get("luks")
+    if isinstance(luks, str):
+        try:
+            luks = json.loads(luks) if luks.strip() not in ("", "None") else []
+        except ValueError:
+            luks = []
+    h["luks"] = luks if isinstance(luks, list) else []
     for k in ("leapp_report", "paths_host"):
         v = h.get(k)
         if isinstance(v, str) and v.strip() in ("", "None", "null"):
@@ -193,8 +204,267 @@ def _normalizza(host):
     return h
 
 
+
+# ---------------------------------------------------------------------------
+# Criteri aziendali
+# ---------------------------------------------------------------------------
+
+# Valori usati quando il tecnico non scrive niente.
+CRITERI_BASE = {
+    "obiettivo": None,                 # versione principale da raggiungere
+    "ram_minima_mb": None,             # None = il minimo di Red Hat
+    "var_minimo_mb": 5120,
+    "boot_minimo_mb": 100,
+    "ore_validita_preupgrade": 24,
+    "backup_obbligatorio_per": ["fisico"],
+    "backup_confermato": False,
+    "blocca_aggiornamenti_gravi": False,
+    "blocca_falle_senza_correzione": False,
+    "pacchetti_vietati": [],
+    "architetture_ammesse": ["x86_64", "aarch64", "ppc64le", "s390x"],
+    "controlli": [],
+}
+
+# Minimi di memoria di Leapp (actor checkmemory, uguali per tutti i salti).
+RAM_LEAPP_MB = {"x86_64": 1536, "aarch64": 1536, "ppc64le": 3072, "s390x": 1536}
+
+
+def _voci(lista, chiave):
+    """Le esclusioni si scrivono come testo o come {server|gruppo, motivo}."""
+    out = []
+    for v in lista or []:
+        if isinstance(v, dict):
+            out.append((str(v.get(chiave, "")), v.get("motivo")))
+        else:
+            out.append((str(v), None))
+    return out
+
+
+def criteri_host(file_criteri, nome, gruppi=None, extra=None):
+    """Unisce i criteri per un server: base < generale < gruppi < server < extra.
+    I controlli aziendali si sommano invece di sostituirsi."""
+    f = file_criteri if isinstance(file_criteri, dict) else {}
+    c = dict(CRITERI_BASE)
+    controlli = []
+    livelli = [f.get("generale") or {}]
+    for g in gruppi or []:
+        livelli.append((f.get("gruppi") or {}).get(g) or {})
+    for modello, val in (f.get("server") or {}).items():
+        if fnmatch.fnmatch(nome, str(modello)):
+            livelli.append(val or {})
+    livelli.append(extra if isinstance(extra, dict) else {})
+    for liv in livelli:
+        for k, v in liv.items():
+            if k == "controlli":
+                controlli += list(v or [])
+            else:
+                c[k] = v
+    c["controlli"] = controlli
+
+    motivo = None
+    if _si_no(c.get("escluso")):
+        motivo = c.get("motivo_esclusione") or "escluso nei criteri aziendali"
+    for modello, perche in _voci(f.get("escludi"), "server"):
+        if not motivo and fnmatch.fnmatch(nome, modello):
+            motivo = perche or "il nome corrisponde a '%s' fra i server esclusi" % modello
+    for gruppo, perche in _voci(f.get("escludi_gruppi"), "gruppo"):
+        if not motivo and gruppo in (gruppi or []):
+            motivo = perche or "fa parte del gruppo escluso '%s'" % gruppo
+    c["escluso"] = bool(motivo)
+    c["motivo_esclusione"] = motivo
+    return c
+
+
+def _esito_controllo(regola, risultato):
+    """Dice se un controllo aziendale e' passato."""
+    rc = _numero((risultato or {}).get("rc"))
+    uscita = str((risultato or {}).get("uscita", ""))
+    ok_se = str(regola.get("ok_se", "rc_zero")).strip()
+    if ok_se == "rc_zero":
+        return rc == 0
+    if ok_se == "rc_diverso_da_zero":
+        return rc is not None and rc != 0
+    if ok_se.startswith("contiene:"):
+        return ok_se.split(":", 1)[1].strip() in uscita
+    if ok_se.startswith("non_contiene:"):
+        return ok_se.split(":", 1)[1].strip() not in uscita
+    return False
+
+
+def _blocco(codice, problema, trovato, richiesto, rimedio, fonte=None):
+    return {"codice": codice, "problema": problema, "trovato": trovato,
+            "richiesto": richiesto, "rimedio": rimedio, "fonte": fonte}
+
+
+def controlla(host, salti, criteri, sicurezza):
+    """Elenca i problemi che impediscono di far partire l'upgrade, ciascuno con
+    il valore trovato, quello richiesto e come risolverlo."""
+    b = []
+    av = []
+    if not salti:
+        return b, av
+    s = salti[0]
+    da = _major(s["parti_da"])
+    verso = _major(s["arrivo"])
+    arch = host.get("architettura") or ""
+
+    ammesse = criteri.get("architetture_ammesse") or []
+    if arch and arch not in ammesse:
+        b.append(_blocco("UA-ARCH", "Architettura non ammessa per l'upgrade",
+                         arch, "una fra " + ", ".join(ammesse),
+                         "Su questa architettura serve un'installazione nuova."))
+
+    ram = host.get("ram_mb")
+    minimo_rh = RAM_LEAPP_MB.get(arch, 1536)
+    minimo = max(minimo_rh, _numero(criteri.get("ram_minima_mb")) or 0)
+    if ram is None:
+        b.append(_blocco("UA-RAM", "Non sono riuscito a leggere la memoria del server",
+                         "sconosciuta", "almeno %d MiB" % minimo,
+                         "Controlla con 'free -m' e rilancia."))
+    elif ram < minimo:
+        b.append(_blocco("UA-RAM", "Memoria insufficiente per RHEL %d" % verso,
+                         "%d MiB" % ram, "almeno %d MiB" % minimo,
+                         "Aggiungi memoria alla macchina (sulle fisiche: banchi di RAM; sulle virtuali: "
+                         "dalla console di virtualizzazione) e rilancia.",
+                         "Leapp lo blocca con: \"Minimum memory requirements for the target OS are not met\""
+                         if ram < minimo_rh else "criterio aziendale ram_minima_mb"))
+
+    for chiave, cartella, crit, fonte in (
+            ("boot_libero_mb", "/boot", "boot_minimo_mb",
+             "Leapp lo blocca sotto 100 MiB con: \"Not enough space on /boot\""),
+            ("var_libero_mb", "/var", "var_minimo_mb",
+             "Leapp scarica i pacchetti nuovi in /var/lib/leapp")):
+        libero = host.get(chiave)
+        serve = _numero(criteri.get(crit)) or 0
+        if libero is None:
+            b.append(_blocco("UA-SPAZIO", "Non sono riuscito a misurare lo spazio libero in %s" % cartella,
+                             "sconosciuto", "almeno %d MiB" % serve,
+                             "Controlla con 'df -m %s' e rilancia." % cartella))
+        elif libero < serve:
+            b.append(_blocco("UA-SPAZIO", "Spazio insufficiente in %s" % cartella,
+                             "%d MiB liberi" % libero, "almeno %d MiB liberi" % serve,
+                             "Libera %d MiB in %s (kernel vecchi, log, cache di %s) o allarga il disco."
+                             % (serve - libero, cartella, _pm(da)), fonte))
+
+    if host.get("fips"):
+        if da == 7:
+            b.append(_blocco("UA-FIPS", "Modalita' FIPS attiva: l'upgrade da RHEL 7 a 8 non e' supportato",
+                             "FIPS attivo", "FIPS spento",
+                             "Spegni FIPS (togli fips=1 dalla riga del kernel e riavvia), "
+                             "oppure fai un'installazione nuova.",
+                             "Leapp lo blocca con: \"Automated upgrades from RHEL 7 to RHEL 8 in FIPS mode "
+                             "are not supported\""))
+        elif da == 9:
+            av.append("FIPS attivo: per il salto da RHEL 9 a 10 Leapp non ha ancora regole sue. "
+                      "Segui la guida ufficiale.")
+
+    luks_male = [d for d in host.get("luks") or []
+                 if str(d.get("versione")) != "2" or not _si_no(d.get("tpm2"))]
+    if luks_male:
+        b.append(_blocco("UA-LUKS", "Dischi cifrati non adatti all'upgrade",
+                         ", ".join("%s (LUKS%s, %s)" % (d.get("dispositivo"), d.get("versione"),
+                                                        "con TPM2" if _si_no(d.get("tpm2")) else "senza TPM2")
+                                   for d in luks_male),
+                         "LUKS2 con sblocco automatico Clevis TPM2",
+                         "Converti i dischi in LUKS2 e collegali al TPM2 con clevis, "
+                         "oppure fai un'installazione nuova.",
+                         "Leapp li blocca (controllo checkluks)"))
+
+    if s.get("serve_aggiornare_minor"):
+        b.append(_blocco("UA-MINOR", "Il sistema non e' all'ultima minor supportata da Leapp",
+                         "RHEL %s" % s["da"], "RHEL %s" % s["parti_da"],
+                         "%s update -y e riavvio, poi rilancia." % _pm(da)))
+
+    registrato = host.get("registrato")
+    if registrato is not True and not host.get("repo_locale"):
+        b.append(_blocco("UA-REPO", "Server senza registrazione e senza repository per la versione nuova",
+                         "registrazione: %s; /etc/leapp/files/leapp_upgrade_repositories.repo: assente"
+                         % ("no" if registrato is False else "sconosciuta"),
+                         "registrazione con Red Hat oppure il file dei repository locali",
+                         "Registra il server (subscription-manager register) o prepara i repository "
+                         "con InstallEnv2Leapp*.yaml."))
+
+    if not host.get("leapp_installato"):
+        b.append(_blocco("UA-LEAPP", "Leapp non e' installato",
+                         "pacchetto leapp-upgrade assente", "leapp-upgrade installato",
+                         "Installa leapp-upgrade, lancia 'leapp preupgrade' e poi rilancia il controllo."))
+    else:
+        eta = host.get("report_eta_ore")
+        valido = _numero(criteri.get("ore_validita_preupgrade")) or 24
+        if host.get("leapp_report") is None:
+            b.append(_blocco("UA-PREUPGRADE", "Manca il controllo di Leapp (leapp preupgrade)",
+                             "/var/log/leapp/leapp-report.json assente o illeggibile",
+                             "un leapp preupgrade senza blocchi", "Lancia 'leapp preupgrade' e rilancia."))
+        elif eta is not None and eta > valido:
+            b.append(_blocco("UA-PREUPGRADE", "Il controllo di Leapp e' troppo vecchio",
+                             "fatto %d ore fa" % eta, "fatto da meno di %d ore" % valido,
+                             "Rilancia 'leapp preupgrade' e poi questo controllo."))
+        for e in _blocchi_leapp(host.get("leapp_report"), con_errori=True):
+            rimedi = "; ".join(r.get("testo") or "" for r in e["rimedi"] if r.get("testo"))
+            b.append(_blocco("UA-LEAPP-" + ("ERRORE" if e.get("errore") else "BLOCCO"),
+                             "Leapp blocca l'upgrade: %s" % e["titolo"],
+                             (e.get("riassunto") or "").strip().replace("\n", " "),
+                             "nessun blocco di Leapp",
+                             rimedi or "Leggi /var/log/leapp/leapp-report.txt.",
+                             "rapporto di leapp preupgrade"))
+
+    tipo = "virtuale" if host.get("virtuale") else "fisico"
+    if tipo in (criteri.get("backup_obbligatorio_per") or []) and not _si_no(criteri.get("backup_confermato")):
+        b.append(_blocco("UA-BACKUP", "Manca la conferma del backup per una macchina %s" % tipo,
+                         "backup non confermato", "backup_confermato: true nei criteri del server",
+                         "Fai il backup (o lo snapshot), poi scrivi backup_confermato: true per questo server "
+                         "in criteri_aziendali.yml oppure lancia con -e upgrade_backup_confermato=true.",
+                         "criterio aziendale backup_obbligatorio_per"))
+
+    installati = set(host.get("pacchetti") or [])
+    vietati = sorted(set(criteri.get("pacchetti_vietati") or []) & installati)
+    if vietati:
+        b.append(_blocco("UA-PACCHETTO", "Ci sono pacchetti che l'azienda non permette di portare nell'upgrade",
+                         ", ".join(vietati), "nessuno di: " + ", ".join(criteri.get("pacchetti_vietati")),
+                         "Togli o sostituisci quei pacchetti, poi rilancia.",
+                         "criterio aziendale pacchetti_vietati"))
+
+    gravi = sicurezza.get("gravi_in_sospeso") or []
+    if gravi and _si_no(criteri.get("blocca_aggiornamenti_gravi")):
+        b.append(_blocco("UA-SICUREZZA", "Aggiornamenti di sicurezza gravi non installati",
+                         ", ".join(sorted(set(a["avviso"] for a in gravi))[:10]), "nessuno",
+                         "%s update --security -y e riavvio." % _pm(da),
+                         "criterio aziendale blocca_aggiornamenti_gravi"))
+    aperte = [x for x in sicurezza.get("cve_che_toccano_il_server") or [] if not x.get("advisories")]
+    if aperte and _si_no(criteri.get("blocca_falle_senza_correzione")):
+        b.append(_blocco("UA-FALLA", "Falle che toccano il server senza correzione di Red Hat",
+                         ", ".join(x["CVE"] for x in aperte[:10]), "nessuna",
+                         "Aspetta la correzione di Red Hat e rilancia.",
+                         "criterio aziendale blocca_falle_senza_correzione"))
+
+    risultati = {r.get("nome"): r for r in host.get("controlli_aziendali") or []}
+    for i, regola in enumerate(criteri.get("controlli") or [], 1):
+        nome = regola.get("nome") or "controllo %d" % i
+        r = risultati.get(nome)
+        if r is None:
+            b.append(_blocco(regola.get("codice") or "UA-AZIENDA-%d" % i,
+                             "Il controllo aziendale '%s' non e' stato eseguito" % nome,
+                             "nessun risultato", "il controllo eseguito sul server",
+                             "Rilancia il ruolo; se si ripete, controlla il comando nei criteri.",
+                             "controllo aziendale '%s'" % nome))
+            continue
+        if _esito_controllo(regola, r):
+            continue
+        voce = _blocco(regola.get("codice") or "UA-AZIENDA-%d" % i,
+                       regola.get("errore") or "Controllo aziendale non superato: %s" % nome,
+                       "uscita %s: %s" % (r.get("rc"), (str(r.get("uscita") or "").strip()[:200] or "vuota")),
+                       "comando '%s' con esito %s" % (regola.get("comando"), regola.get("ok_se", "rc_zero")),
+                       regola.get("rimedio") or "Vedi le istruzioni interne per: %s" % nome,
+                       "controllo aziendale '%s'" % nome)
+        if _si_no(regola.get("blocca", True)) is not False:
+            b.append(voce)
+        else:
+            av.append("%s: %s (%s)" % (voce["codice"], voce["problema"], voce["trovato"]))
+    return b, av
+
+
 def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None,
-              major_obiettivo=None, flavour="default"):
+              major_obiettivo=None, flavour="default", criteri=None):
     """Costruisce la procedura consigliata per un server.
 
     Se sul server c'e' gia' Leapp, il suo elenco dei salti (host["paths_host"])
@@ -202,6 +472,10 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
     L'elenco pubblico su GitHub puo' citare versioni non ancora uscite, quindi
     senza Leapp installato non si mette --target e decide Leapp."""
     host = _normalizza(host)
+    if not isinstance(criteri, dict):
+        criteri = criteri_host({}, host.get("nome") or "")
+    if criteri.get("obiettivo"):
+        major_obiettivo = criteri["obiettivo"]
     cve_pubbliche = cve_pubbliche or {}
     distro = host.get("distribuzione", "")
     versione = str(host.get("versione", ""))
@@ -218,14 +492,28 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
         "sicurezza": {},
         "novita": [],
         "fonti": host.get("fonti", {}),
+        "stato": "bloccato",
+        "blocchi": [],
+        "obiettivo": major_obiettivo,
+        "criteri": {k: v for k, v in criteri.items() if k != "controlli"},
         "macchina": {k: host.get(k) for k in ("architettura", "virtuale", "tipo_virtuale", "uefi",
                                               "var_libero_mb", "boot_libero_mb", "kernel_installati",
-                                              "fips", "dischi_cifrati", "registrato")},
+                                              "fips", "dischi_cifrati", "registrato", "ram_mb")},
     }
 
+    if criteri.get("escluso"):
+        esito["stato"] = "escluso"
+        esito["avvisi"].append("Server escluso: %s." % criteri["motivo_esclusione"])
+        esito["procedura_cambiata"] = False
+        return esito
+
     if distro not in ("RedHat",):
+        esito["blocchi"].append(_blocco(
+            "UA-SISTEMA", "Sistema non supportato da questo ruolo", distro or "sconosciuto",
+            "Red Hat Enterprise Linux", "Per altre distribuzioni serve la loro guida di upgrade."))
         esito["avvisi"].append(
             "Il sistema e' %s: questo ruolo consiglia solo per Red Hat Enterprise Linux." % distro)
+        esito["procedura_cambiata"] = False
         return esito
 
     paths_host = host.get("paths_host")
@@ -235,8 +523,15 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
         if primo:
             salti = [primo] + catena(primo["arrivo"], paths_main, paths_rhel7, major_obiettivo, flavour)
     if not salti:
-        esito["avvisi"].append(
-            "Nessun salto supportato da RHEL %s nelle linee guida pubblicate." % versione)
+        if major_obiettivo and major >= int(major_obiettivo):
+            esito["stato"] = "aggiornato"
+        else:
+            esito["blocchi"].append(_blocco(
+                "UA-VERSIONE", "Nessun upgrade supportato da questa versione",
+                "RHEL %s" % versione, "una versione presente nelle linee guida di Leapp",
+                "Controlla la guida ufficiale: potrebbe servire un'installazione nuova."))
+            esito["avvisi"].append(
+                "Nessun salto supportato da RHEL %s nelle linee guida pubblicate." % versione)
 
     # --- Sicurezza: avvisi in sospeso sul server e CVE pubbliche recenti.
     sospesi = _avvisi_sicurezza(host.get("updateinfo", []))
@@ -337,6 +632,7 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
         passo = {
             "titolo": titolo,
             "arrivo": s["arrivo"] if sicuro else None,
+            "major_arrivo": _major(s["arrivo"]),
             "guida": DOCS.get(da_major),
             "altre_destinazioni": [v for v in s["possibili"] if v != s["arrivo"]],
             "comandi": installa + [
@@ -388,6 +684,17 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
              "perche": "Chiude le falle uscite dopo la versione di arrivo."},
         ]
 
+    # --- Il cancello: si parte solo se e' tutto a posto.
+    blocchi, avvisi = controlla(host, salti, criteri, esito["sicurezza"])
+    esito["blocchi"] += blocchi
+    esito["avvisi"] += avvisi
+    if salti and not esito["blocchi"]:
+        esito["stato"] = "via_libera"
+    esito["prossimo_comando"] = None
+    if esito["salti"]:
+        esito["prossimo_comando"] = next(
+            (c for c in esito["salti"][0]["comandi"] if c.startswith("leapp upgrade")), None)
+
     # --- Cosa e' cambiato rispetto al giro precedente.
     if precedente:
         def impronta(e):
@@ -401,4 +708,5 @@ def consiglia(host, paths_main, paths_rhel7, cve_pubbliche=None, precedente=None
 
 class FilterModule(object):
     def filters(self):
-        return {"consiglia_upgrade": consiglia, "cve_del_server": cve_del_server}
+        return {"consiglia_upgrade": consiglia, "cve_del_server": cve_del_server,
+                "criteri_host": criteri_host}

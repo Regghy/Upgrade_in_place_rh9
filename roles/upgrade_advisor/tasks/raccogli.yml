@@ -1,98 +1,172 @@
 ---
-- name: Spazio libero in /var e /boot (MB)
-  ansible.builtin.command: "df -Pm {{ item }}"
-  loop:
-    - /var
-    - /boot
-  register: ua_df
-  changed_when: false
-  failed_when: false
-  check_mode: false
+# Sui server esclusi non si lancia niente, nemmeno la raccolta dei dati.
 
-- name: Avvio UEFI o BIOS
-  ansible.builtin.stat:
-    path: /sys/firmware/efi
-  register: ua_efi
-
-- name: Kernel installati
-  ansible.builtin.command: rpm -q kernel
-  register: ua_kernel
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Nomi dei pacchetti installati
-  ansible.builtin.command: rpm -qa --qf '%{NAME}\n'
-  register: ua_rpm
-  changed_when: false
-  check_mode: false
-
-- name: Modalita' FIPS
-  ansible.builtin.command: cat /proc/sys/crypto/fips_enabled
-  register: ua_fips
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Dischi cifrati LUKS
-  ansible.builtin.command: lsblk -n -o TYPE
-  register: ua_lsblk
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Il server e' registrato con Red Hat?
-  ansible.builtin.command: subscription-manager identity
-  register: ua_rhsm
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Aggiornamenti di sicurezza non ancora installati
-  ansible.builtin.command: "{{ 'yum' if ansible_facts['distribution_major_version'] == '7' else 'dnf' }} -q updateinfo list --security"
-  register: ua_updateinfo
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Rapporto di un leapp preupgrade gia' fatto
-  ansible.builtin.slurp:
-    src: /var/log/leapp/leapp-report.json
-  register: ua_report
-  failed_when: false
-
-- name: Elenco dei salti del Leapp installato sul server
-  ansible.builtin.find:
-    paths:
-      - /etc/leapp/files
-      - /usr/share/leapp-repository/repositories/system_upgrade/common/files
-    patterns: upgrade_paths.json
-  register: ua_paths_trovati
-  failed_when: false
-
-- name: Leggi l'elenco del Leapp installato
-  ansible.builtin.slurp:
-    src: "{{ ua_paths_trovati.files[0].path }}"
-  register: ua_paths_host
-  when: ua_paths_trovati.files | default([]) | length > 0
-
-- name: Metti insieme i dati del server
+- name: Server escluso, dati minimi
   ansible.builtin.set_fact:
     ua_host:
       nome: "{{ inventory_hostname }}"
-      distribuzione: "{{ ansible_facts['distribution'] }}"
-      versione: "{{ ansible_facts['distribution_version'] }}"
-      architettura: "{{ ansible_facts['architecture'] }}"
-      virtuale: "{{ ansible_facts.get('virtualization_role', 'NA') == 'guest' }}"
-      tipo_virtuale: "{{ ansible_facts.get('virtualization_type', 'NA') }}"
-      uefi: "{{ ua_efi.stat.exists | default(false) }}"
-      var_libero_mb: "{{ (ua_df.results[0].stdout_lines[-1].split()[3] | int) if ua_df.results[0].rc == 0 else None }}"
-      boot_libero_mb: "{{ (ua_df.results[1].stdout_lines[-1].split()[3] | int) if ua_df.results[1].rc == 0 else None }}"
-      kernel_installati: "{{ (ua_kernel.stdout_lines | length) if ua_kernel.rc == 0 else 0 }}"
-      pacchetti: "{{ ua_rpm.stdout_lines | unique }}"
-      fips: "{{ ua_fips.stdout | default('0') | trim == '1' }}"
-      dischi_cifrati: "{{ 'crypt' in ua_lsblk.stdout_lines | default([]) }}"
-      registrato: "{{ (ua_rhsm.rc == 0) if ua_rhsm.rc in [0, 1] else None }}"
-      updateinfo: "{{ ua_updateinfo.stdout_lines | default([]) }}"
-      leapp_report: "{{ (ua_report.content | b64decode) if ua_report.content is defined else None }}"
-      paths_host: "{{ (ua_paths_host.content | b64decode) if ua_paths_host.content is defined else None }}"
+      major: ""
+  when: ua_criteri.escluso
+
+- name: Raccolta dei dati (sola lettura)
+  when: not ua_criteri.escluso
+  block:
+    - name: Dati di base del sistema
+      ansible.builtin.setup:
+        gather_subset:
+          - "!all"
+          - "!min"
+          - distribution
+          - hardware
+          - virtual
+          - platform
+
+    - name: Spazio libero in /var e /boot (MB)
+      ansible.builtin.command: "df -Pm {{ item }}"
+      loop:
+        - /var
+        - /boot
+      register: ua_df
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Avvio UEFI o BIOS
+      ansible.builtin.stat:
+        path: /sys/firmware/efi
+      register: ua_efi
+
+    - name: Kernel installati
+      ansible.builtin.command: rpm -q kernel
+      register: ua_kernel
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Nomi dei pacchetti installati
+      ansible.builtin.command: rpm -qa --qf '%{NAME}\n'
+      register: ua_rpm
+      changed_when: false
+      check_mode: false
+
+    - name: Modalita' FIPS
+      ansible.builtin.command: cat /proc/sys/crypto/fips_enabled
+      register: ua_fips
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Dischi cifrati LUKS, versione e sblocco TPM2
+      ansible.builtin.shell: |
+        set -o pipefail 2>/dev/null
+        primo=1
+        printf '['
+        for d in $(lsblk -p -n -l -o NAME,FSTYPE 2>/dev/null | awk '$2=="crypto_LUKS"{print $1}'); do
+          v=$(cryptsetup luksDump "$d" 2>/dev/null | awk '/^Version:/{print $2; exit}')
+          t=$(clevis luks list -d "$d" 2>/dev/null | grep -c tpm2)
+          [ "$primo" = 1 ] || printf ','
+          primo=0
+          printf '{"dispositivo":"%s","versione":"%s","tpm2":%s}' "$d" "${v:-?}" "$([ "${t:-0}" -gt 0 ] && echo true || echo false)"
+        done
+        printf ']'
+      register: ua_luks
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Il server e' registrato con Red Hat?
+      ansible.builtin.command: subscription-manager identity
+      register: ua_rhsm
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Repository locali per Leapp (server senza registrazione)
+      ansible.builtin.stat:
+        path: /etc/leapp/files/leapp_upgrade_repositories.repo
+      register: ua_repo_locale
+
+    - name: Aggiornamenti di sicurezza non ancora installati
+      ansible.builtin.command: "{{ 'yum' if ansible_facts['distribution_major_version'] == '7' else 'dnf' }} -q updateinfo list --security"
+      register: ua_updateinfo
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Quando e' stato fatto l'ultimo leapp preupgrade
+      ansible.builtin.stat:
+        path: /var/log/leapp/leapp-report.json
+      register: ua_report_stat
+
+    - name: Rapporto dell'ultimo leapp preupgrade
+      ansible.builtin.slurp:
+        src: /var/log/leapp/leapp-report.json
+      register: ua_report
+      when: ua_report_stat.stat.exists | default(false)
+
+    - name: Elenco dei salti del Leapp installato sul server
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/leapp/files/upgrade_paths.json
+        - /usr/share/leapp-repository/repositories/system_upgrade/common/files/upgrade_paths.json
+      register: ua_paths_trovati
+
+    - name: Leggi l'elenco del Leapp installato
+      ansible.builtin.slurp:
+        src: "{{ (ua_paths_trovati.results | selectattr('stat.exists') | first).stat.path }}"
+      register: ua_paths_host
+      when: ua_paths_trovati.results | selectattr('stat.exists') | list | length > 0
+
+    - name: Controlli aziendali (comandi scritti dal tecnico nei criteri)
+      ansible.builtin.shell: "{{ item.comando }}"
+      loop: "{{ ua_criteri.controlli }}"
+      loop_control:
+        label: "{{ item.nome | default(item.comando) }}"
+      register: ua_controlli
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      timeout: 300
+
+    - name: Esiti dei controlli aziendali
+      ansible.builtin.set_fact:
+        ua_controlli_esiti: >-
+          {{ ua_controlli_esiti | default([]) + [{
+               'nome': item.item.nome | default('controllo ' ~ (indice + 1)),
+               'rc': item.rc | default(None),
+               'uscita': ((item.stdout | default('')) ~ ' ' ~ (item.stderr | default(item.msg | default('')))) | trim }] }}
+      loop: "{{ ua_controlli.results | default([]) }}"
+      loop_control:
+        index_var: indice
+        label: "{{ item.item.nome | default(indice + 1) }}"
+
+    - name: Metti insieme i dati del server
+      ansible.builtin.set_fact:
+        ua_host:
+          nome: "{{ inventory_hostname }}"
+          major: "{{ ansible_facts['distribution_major_version'] }}"
+          distribuzione: "{{ ansible_facts['distribution'] }}"
+          versione: "{{ ansible_facts['distribution_version'] }}"
+          architettura: "{{ ansible_facts['architecture'] }}"
+          ram_mb: "{{ ansible_facts.get('memtotal_mb') }}"
+          virtuale: "{{ ansible_facts.get('virtualization_role', 'NA') == 'guest' }}"
+          tipo_virtuale: "{{ ansible_facts.get('virtualization_type', 'NA') }}"
+          uefi: "{{ ua_efi.stat.exists | default(false) }}"
+          var_libero_mb: "{{ (ua_df.results[0].stdout_lines[-1].split()[3] | int) if ua_df.results[0].rc == 0 else None }}"
+          boot_libero_mb: "{{ (ua_df.results[1].stdout_lines[-1].split()[3] | int) if ua_df.results[1].rc == 0 else None }}"
+          kernel_installati: "{{ (ua_kernel.stdout_lines | length) if ua_kernel.rc == 0 else 0 }}"
+          pacchetti: "{{ ua_rpm.stdout_lines | unique }}"
+          leapp_installato: "{{ ua_rpm.stdout_lines | select('match', '^leapp-upgrade') | list | length > 0 }}"
+          fips: "{{ ua_fips.stdout | default('0') | trim == '1' }}"
+          luks: "{{ ua_luks.stdout | default('[]', true) }}"
+          dischi_cifrati: "{{ (ua_luks.stdout | default('', true) | trim) not in ['', '[]'] }}"
+          registrato: "{{ (ua_rhsm.rc == 0) if ua_rhsm.rc in [0, 1] else None }}"
+          repo_locale: "{{ ua_repo_locale.stat.exists | default(false) }}"
+          updateinfo: "{{ ua_updateinfo.stdout_lines | default([]) }}"
+          leapp_report: "{{ (ua_report.content | b64decode) if ua_report.content is defined else None }}"
+          report_eta_ore: >-
+            {{ (((now().timestamp() - ua_report_stat.stat.mtime) / 3600) | int)
+               if ua_report_stat.stat.exists | default(false) else None }}
+          paths_host: "{{ (ua_paths_host.content | b64decode) if ua_paths_host.content is defined else None }}"
+          controlli_aziendali: "{{ ua_controlli_esiti | default([]) }}"

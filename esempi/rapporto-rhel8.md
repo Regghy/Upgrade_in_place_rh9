@@ -1,11 +1,21 @@
+<!-- Rapporto vero della prova su un container RHEL 8.10. Nei criteri di prova il gruppo "fisici" chiedeva apposta 999999 MiB di memoria, per vedere il blocco UA-RAM. -->
+
 # Upgrade in place di ua-rhel8
+
+## Esito: BLOCCATO, l'upgrade non puo' partire
+
+| Codice | Problema | Trovato | Richiesto | Come risolvere |
+|---|---|---|---|---|
+| UA-RAM | Memoria insufficiente per RHEL 9 | 15746 MiB | almeno 999999 MiB | Aggiungi memoria alla macchina (sulle fisiche: banchi di RAM; sulle virtuali: dalla console di virtualizzazione) e rilancia. (criterio aziendale ram_minima_mb) |
+| UA-REPO | Server senza registrazione e senza repository per la versione nuova | registrazione: no; /etc/leapp/files/leapp_upgrade_repositories.repo: assente | registrazione con Red Hat oppure il file dei repository locali | Registra il server (subscription-manager register) o prepara i repository con InstallEnv2Leapp*.yaml. |
+| UA-LEAPP | Leapp non e' installato | pacchetto leapp-upgrade assente | leapp-upgrade installato | Installa leapp-upgrade, lancia 'leapp preupgrade' e poi rilancia il controllo. |
 
 Sistema attuale: **RedHat 8.10** (x86_64,
 macchina virtuale container,
 avvio BIOS,
 non registrato: upgrade dai repository locali).
 
-Rapporto del 2026-11-06T15:06:26Z. Linee guida: scaricati ora da GitHub (oamg/leapp-repository). Falle: scaricate ora da Red Hat, dal 2026-10-07.
+Rapporto del 2026-11-06 16:31 UTC. Linee guida: scaricati ora da GitHub (oamg/leapp-repository). Falle: scaricate ora da Red Hat, dal 2026-10-07.
 
 
 ## Attenzione
@@ -16,25 +26,23 @@ Rapporto del 2026-11-06T15:06:26Z. Linee guida: scaricati ora da GitHub (oamg/le
 
 1. **Fai un backup o uno snapshot della macchina**. Leapp non ha un tasto per tornare indietro: senza copia non si torna alla versione di prima.
 
-## Salto 1: Da RHEL 8.10 a RHEL 9.6
+## Salto 1: Da RHEL 8.10 a RHEL 9.8 / 9.9 / 9.10 (o la predefinita di Leapp)
 
 Guida ufficiale: https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/upgrading_from_rhel_8_to_rhel_9/index
+Altre destinazioni possibili: 9.8, 9.9.
 
 ```bash
 dnf install -y leapp-upgrade
-leapp preupgrade --target 9.6 --no-rhsm
+leapp preupgrade --no-rhsm
 less /var/log/leapp/leapp-report.txt  # leggi il rapporto e risolvi i blocchi
-leapp upgrade --target 9.6 --no-rhsm
+leapp upgrade --no-rhsm
 reboot
 cat /etc/redhat-release; uname -r  # controlla la versione di arrivo
 ```
 
+- Senza --target Leapp sceglie la destinazione predefinita della versione installata. Per sceglierla tu: dopo aver installato leapp-upgrade rilancia questo ruolo, che leggera' l'elenco del programma installato.
+
 - Server non registrato: prepara i repository della versione di arrivo in /etc/leapp/files/leapp_upgrade_repositories.repo (per esempio dal DVD servito via http, come nei playbook InstallEnv2Leapp).
-
-**Problemi che bloccano l'upgrade, dall'ultimo `leapp preupgrade`:**
-
-- **Missing required answers in the answer file**: One or more sections in answerfile are missing user choices
-  - comando: `leapp answer --section check_vdo.confirm=True`
 
 ## Salto 2: Da RHEL 9 a RHEL 10
 

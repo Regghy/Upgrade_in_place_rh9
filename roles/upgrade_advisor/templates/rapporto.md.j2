@@ -1,6 +1,27 @@
 {% set e = ua_esito %}
+{% set etichette = {"via_libera": "VIA LIBERA, l'upgrade puo' partire", "bloccato": "BLOCCATO, l'upgrade non puo' partire", "escluso": "ESCLUSO, questo server non si tocca", "aggiornato": "GIA' AGGIORNATO alla versione richiesta"} %}
 # Upgrade in place di {{ e.host }}
 
+## Esito: {{ etichette[e.stato] | default(e.stato) }}
+
+{% if e.stato == 'escluso' %}
+{% for a in e.avvisi %}
+{{ a }}
+{% endfor %}
+
+Rapporto del {{ e.fonti.quando }}. Per toglierlo dagli esclusi, modifica criteri_aziendali.yml.
+{% else %}
+{% if e.blocchi %}
+| Codice | Problema | Trovato | Richiesto | Come risolvere |
+|---|---|---|---|---|
+{% for b in e.blocchi %}
+| {{ b.codice }} | {{ b.problema | replace('|', '/') }} | {{ b.trovato | replace('|', '/') }} | {{ b.richiesto | replace('|', '/') }} | {{ b.rimedio | replace('|', '/') }}{{ (' (' ~ b.fonte ~ ')') if b.fonte else '' }} |
+{% endfor %}
+
+{% elif e.stato == 'via_libera' %}
+Tutti i controlli sono passati. Comando che lancera' LeappUpgrade.yaml: `{{ e.prossimo_comando }}`
+
+{% endif %}
 Sistema attuale: **{{ e.sistema }}** ({{ e.macchina.architettura }},
 {{ 'macchina virtuale ' ~ e.macchina.tipo_virtuale if e.macchina.virtuale else 'server fisico' }},
 avvio {{ 'UEFI' if e.macchina.uefi else 'BIOS' }},
@@ -97,4 +118,5 @@ Altre destinazioni possibili: {{ s.altre_destinazioni | join(', ') }}.
 {% for c in e.sicurezza.cve_che_toccano_il_server %}
 | {{ c.CVE }} | {{ c.severity | default('') }} | {{ c.pacchetti_installati | join(', ') }} | {% set adv = c.advisories | default([]) | sort %}{{ (adv[:3] | join(', ') ~ ((' e altre ' ~ (adv | length - 3)) if adv | length > 3 else '')) if adv else 'non ancora uscita' }} |
 {% endfor %}
+{% endif %}
 {% endif %}

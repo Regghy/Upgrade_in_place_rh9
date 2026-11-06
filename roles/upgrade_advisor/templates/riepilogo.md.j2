@@ -2,9 +2,9 @@
 
 Giro del {{ ua_fonti.quando }}. Linee guida: {{ ua_fonti.salti }}. Falle: {{ ua_fonti.falle }}.
 
-| Server | Sistema | Salti | Procedura cambiata | Falle nuove | Avvisi |
-|---|---|---|---|---|---|
+| Server | Esito | Blocchi | Sistema | Salti | Procedura cambiata | Falle nuove |
+|---|---|---|---|---|---|---|
 {% for h in ansible_play_hosts %}
 {% set e = hostvars[h].ua_esito %}
-| [{{ h }}]({{ h }}.md) | {{ e.sistema }} | {{ e.salti | map(attribute='titolo') | join(' → ') or 'nessuno' }} | {{ 'si' if e.procedura_cambiata else 'no' }} | {{ e.novita | length }} | {{ e.avvisi | length }} |
+| [{{ h }}]({{ h }}.md) | {{ e.stato | replace('_', ' ') }} | {{ e.blocchi | map(attribute='codice') | join(', ') or '-' }} | {{ e.sistema if e.stato != 'escluso' else '-' }} | {{ e.salti | map(attribute='titolo') | join(' → ') or '-' }} | {{ 'si' if e.procedura_cambiata else 'no' }} | {{ e.novita | length }} |
 {% endfor %}

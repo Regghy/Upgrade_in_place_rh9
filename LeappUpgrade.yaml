@@ -1,0 +1,96 @@
+---
+# Fa partire l'upgrade in place, ma SOLO sui server che hanno il via libera
+# del consigliere (ruolo upgrade_advisor). Se un controllo non passa, il
+# server si ferma qui con l'errore esatto e non viene toccato.
+#
+#   ansible-playbook -i inventario LeappUpgrade.yaml
+#   ansible-playbook -i inventario LeappUpgrade.yaml -e upgrade_backup_confermato=true
+#   ansible-playbook -i inventario LeappUpgrade.yaml -e upgrade_quanti_insieme=3
+#
+# Prima serve un "leapp preupgrade" recente su ogni server (LeappPreupgrade.yaml).
+
+- name: Controllo prima dell'upgrade
+  hosts: all
+  become: true
+  gather_facts: false
+  roles:
+    - upgrade_advisor
+  tasks:
+    - name: Server esclusi o gia' aggiornati, non si tocca niente
+      ansible.builtin.meta: end_host
+      when: ua_esito.stato in ['escluso', 'aggiornato']
+
+    - name: Ferma i server senza via libera, con l'errore esatto
+      ansible.builtin.fail:
+        msg: |-
+          UPGRADE NON AVVIATO su {{ inventory_hostname }} ({{ ua_esito.sistema }}).
+          {% for b in ua_esito.blocchi %}
+          [{{ b.codice }}] {{ b.problema }}
+              trovato: {{ b.trovato }}
+              richiesto: {{ b.richiesto }}
+              come risolvere: {{ b.rimedio }}{% if b.fonte %}
+
+              fonte: {{ b.fonte }}{% endif %}
+
+          {% endfor %}
+          Rapporto completo: {{ upgrade_advisor_cartella_rapporti }}/{{ inventory_hostname }}.md
+      when: ua_esito.stato != 'via_libera'
+
+- name: Upgrade in place
+  hosts: all
+  become: true
+  gather_facts: false
+  serial: "{{ upgrade_quanti_insieme | default(1) }}"
+  max_fail_percentage: 0
+  tasks:
+    - name: Upgrade solo con il via libera
+      when:
+        - ua_esito is defined
+        - ua_esito.stato == 'via_libera'
+        - ua_esito.prossimo_comando | default('', true) | length > 0
+      block:
+        - name: Lancia leapp upgrade
+          ansible.builtin.command:
+            argv: "{{ ua_esito.prossimo_comando.split() }}"
+          register: ua_upgrade
+          changed_when: ua_upgrade.rc == 0
+          failed_when: false
+
+        - name: Leapp si e' fermato
+          ansible.builtin.fail:
+            msg: |-
+              [UA-UPGRADE] leapp upgrade non riuscito su {{ inventory_hostname }} (codice {{ ua_upgrade.rc }}).
+              Il server non e' stato riavviato ed e' ancora su {{ ua_esito.sistema }}.
+              Ultime righe di Leapp:
+              {% for riga in ((ua_upgrade.stdout_lines | default([])) + (ua_upgrade.stderr_lines | default([])))[-25:] %}
+                {{ riga }}
+              {% endfor %}
+              Dettagli: /var/log/leapp/leapp-report.txt e /var/log/leapp/leapp-upgrade.log
+          when: ua_upgrade.rc != 0
+
+        - name: Riavvia per completare l'upgrade (puo' durare piu' di un'ora)
+          ansible.builtin.reboot:
+            msg: Upgrade in place con Leapp
+            reboot_timeout: 7200
+
+        - name: Leggi la versione dopo il riavvio
+          ansible.builtin.setup:
+            gather_subset:
+              - "!all"
+              - "!min"
+              - distribution
+
+        - name: Controlla di essere arrivati alla versione nuova
+          ansible.builtin.fail:
+            msg: |-
+              [UA-ARRIVO] Dopo il riavvio {{ inventory_hostname }} e' su RHEL {{ ansible_facts['distribution_version'] }},
+              invece che su RHEL {{ ua_esito.salti[0].major_arrivo }}. L'upgrade non e' andato a buon fine.
+              Guarda /var/log/leapp/leapp-upgrade.log e /var/log/leapp/leapp-report.txt sul server.
+          when: ansible_facts['distribution_major_version'] | int != ua_esito.salti[0].major_arrivo | int
+
+        - name: Upgrade riuscito
+          ansible.builtin.debug:
+            msg: >-
+              {{ inventory_hostname }} ora e' su RHEL {{ ansible_facts['distribution_version'] }}.
+              Lancia i passi finali (PostUpgradeTasks.yaml) e poi di nuovo consiglia_upgrade.yml
+              per il salto successivo.
