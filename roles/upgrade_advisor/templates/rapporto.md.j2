@@ -1,0 +1,100 @@
+{% set e = ua_esito %}
+# Upgrade in place di {{ e.host }}
+
+Sistema attuale: **{{ e.sistema }}** ({{ e.macchina.architettura }},
+{{ 'macchina virtuale ' ~ e.macchina.tipo_virtuale if e.macchina.virtuale else 'server fisico' }},
+avvio {{ 'UEFI' if e.macchina.uefi else 'BIOS' }},
+{{ 'registrato con Red Hat' if e.macchina.registrato else ('non registrato: upgrade dai repository locali' if e.macchina.registrato is sameas false else 'registrazione sconosciuta') }}).
+
+Rapporto del {{ e.fonti.quando }}. Linee guida: {{ e.fonti.salti }}. Falle: {{ e.fonti.falle }}.
+
+{% if e.procedura_cambiata %}
+> **La procedura e' cambiata rispetto al giro precedente.**
+{% endif %}
+{% if e.novita %}
+> **{{ '1 falla nuova tocca' if e.novita | length == 1 else (e.novita | length | string) ~ ' falle nuove toccano' }} questo server:**
+> {{ e.novita | map(attribute='CVE') | join(', ') }}
+{% endif %}
+
+{% if e.avvisi %}
+## Attenzione
+
+{% for a in e.avvisi %}
+- {{ a }}
+{% endfor %}
+
+{% endif %}
+{% if not e.salti %}
+Nessun upgrade da fare o possibile con Leapp.
+{% else %}
+## Prima dell'upgrade
+
+{% for p in e.prima %}
+{{ loop.index }}. **{{ p.titolo }}**. {{ p.perche }}
+{% if p.comandi %}
+
+   ```bash
+{% for c in p.comandi %}
+   {{ c }}
+{% endfor %}
+   ```
+{% endif %}
+{% endfor %}
+
+{% for s in e.salti %}
+## Salto {{ loop.index }}: {{ s.titolo }}
+
+Guida ufficiale: {{ s.guida }}
+{% if s.altre_destinazioni %}
+Altre destinazioni possibili: {{ s.altre_destinazioni | join(', ') }}.
+{% endif %}
+
+```bash
+{% for c in s.comandi %}
+{{ c }}
+{% endfor %}
+```
+{% for n in s.note %}
+
+- {{ n }}
+{% endfor %}
+{% if s.blocchi_attuali is defined and s.blocchi_attuali %}
+
+**Problemi che bloccano l'upgrade, dall'ultimo `leapp preupgrade`:**
+
+{% for b in s.blocchi_attuali %}
+- **{{ b.titolo }}**: {{ b.riassunto | default('', true) | replace('\n', ' ') }}
+{% for r in b.rimedi %}
+  - {{ 'comando' if r.tipo == 'command' else 'suggerimento' }}: `{{ r.testo }}`
+{% endfor %}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+## Dopo l'ultimo salto
+
+{% for p in e.dopo %}
+{{ loop.index }}. **{{ p.titolo }}**. {{ p.perche }}
+
+   ```bash
+{% for c in p.comandi %}
+   {{ c }}
+{% endfor %}
+   ```
+{% endfor %}
+{% endif %}
+
+## Sicurezza
+
+- Aggiornamenti di sicurezza non installati: {{ e.sicurezza.avvisi_in_sospeso | length }}
+  (gravi: {{ e.sicurezza.gravi_in_sospeso | length }}).
+- Falle pubbliche recenti guardate: {{ e.sicurezza.cve_pubbliche_guardate }};
+  quelle che toccano pacchetti di questo server: {{ e.sicurezza.cve_che_toccano_il_server | length }}.
+{% if e.sicurezza.cve_che_toccano_il_server %}
+
+| Falla | Gravita' | Pacchetti del server | Correzione |
+|---|---|---|---|
+{% for c in e.sicurezza.cve_che_toccano_il_server %}
+| {{ c.CVE }} | {{ c.severity | default('') }} | {{ c.pacchetti_installati | join(', ') }} | {% set adv = c.advisories | default([]) | sort %}{{ (adv[:3] | join(', ') ~ ((' e altre ' ~ (adv | length - 3)) if adv | length > 3 else '')) if adv else 'non ancora uscita' }} |
+{% endfor %}
+{% endif %}

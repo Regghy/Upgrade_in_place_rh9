@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: upgrade_advisor
+  author: Regghy
+  description: Consiglia la procedura di upgrade in place di RHEL con Leapp, in base al server e alle falle pubbliche
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: EL
+      versions: ["7", "8", "9", "10"]
+dependencies: []

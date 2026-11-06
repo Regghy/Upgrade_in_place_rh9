@@ -1,0 +1,95 @@
+---
+# Tutto qui gira una volta sola, sul computer da cui si lancia Ansible.
+
+- name: Cartella dei rapporti
+  ansible.builtin.file:
+    path: "{{ upgrade_advisor_cartella_rapporti }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+
+- name: Scarica l'elenco aggiornato dei salti (RHEL 8, 9, 10)
+  ansible.builtin.uri:
+    url: "{{ upgrade_advisor_url_salti }}"
+    return_content: true
+    timeout: 30
+  register: ua_salti_web
+  when: upgrade_advisor_online | bool
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+
+- name: Scarica l'elenco dei salti da RHEL 7
+  ansible.builtin.uri:
+    url: "{{ upgrade_advisor_url_salti_rhel7 }}"
+    return_content: true
+    timeout: 30
+  register: ua_salti7_web
+  when: upgrade_advisor_online | bool
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+
+- name: Versioni principali presenti fra i server
+  ansible.builtin.set_fact:
+    ua_major_presenti: "{{ ansible_play_hosts | map('extract', hostvars, ['ansible_facts', 'distribution_major_version']) | unique | list }}"
+    ua_dal_giorno: "{{ '%Y-%m-%d' | strftime((ansible_facts['date_time']['epoch'] | int) - (upgrade_advisor_giorni_cve | int) * 86400) }}"
+  run_once: true
+
+- name: Scarica le falle pubbliche recenti di Red Hat
+  ansible.builtin.uri:
+    url: "{{ upgrade_advisor_url_cve }}?product=Red%20Hat%20Enterprise%20Linux%20{{ item.0 }}&severity={{ item.1 }}&after={{ ua_dal_giorno }}&per_page=1000"
+    return_content: true
+    timeout: 60
+  loop: "{{ ua_major_presenti | product(upgrade_advisor_gravita_cve) | list }}"
+  loop_control:
+    label: "RHEL {{ item.0 }} {{ item.1 }}"
+  register: ua_cve_web
+  when: upgrade_advisor_online | bool
+  failed_when: false
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+
+- name: Falle del giro precedente (riserva se Red Hat non risponde)
+  ansible.builtin.set_fact:
+    ua_cve_cache: "{{ lookup('ansible.builtin.file', upgrade_advisor_cartella_rapporti ~ '/_cve.json', errors='ignore') | default('{}', true) | from_json }}"
+  run_once: true
+
+- name: Unisci le falle per versione principale
+  ansible.builtin.set_fact:
+    ua_cve: "{{ ua_cve | default({}) | combine({(item.item.0 | string): (ua_cve | default({}))[item.item.0 | string] | default([]) + (item.json | default([]))}) }}"
+  loop: "{{ ua_cve_web.results | default([]) | selectattr('status', 'defined') | selectattr('status', 'equalto', 200) | list }}"
+  loop_control:
+    label: "RHEL {{ item.item.0 }} {{ item.item.1 }}"
+  run_once: true
+
+- name: Scegli le fonti da usare
+  ansible.builtin.set_fact:
+    ua_salti: "{{ (ua_salti_web.content | from_json) if (ua_salti_web.status | default(0)) == 200 else lookup('ansible.builtin.file', 'upgrade_paths_main.json') | from_json }}"
+    ua_salti7: "{{ (ua_salti7_web.content | from_json) if (ua_salti7_web.status | default(0)) == 200 else lookup('ansible.builtin.file', 'upgrade_paths_rhel7.json') | from_json }}"
+    ua_cve_finali: "{{ ua_cve if (ua_cve | default({}) | length > 0) else ua_cve_cache }}"
+    ua_fonti:
+      salti: "{{ 'scaricati ora da GitHub (oamg/leapp-repository)' if (ua_salti_web.status | default(0)) == 200 else 'copia inclusa nel ruolo' }}"
+      falle: "{{ ('scaricate ora da Red Hat, dal ' ~ ua_dal_giorno) if (ua_cve | default({}) | length > 0) else 'copia del giro precedente' }}"
+      quando: "{{ ansible_facts['date_time']['iso8601'] }}"
+  run_once: true
+
+- name: Salva le falle per il prossimo giro
+  ansible.builtin.copy:
+    content: "{{ ua_cve_finali | to_nice_json }}"
+    dest: "{{ upgrade_advisor_cartella_rapporti }}/_cve.json"
+    mode: "0644"
+  when: ua_cve | default({}) | length > 0
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true

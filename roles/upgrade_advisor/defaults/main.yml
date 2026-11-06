@@ -1,0 +1,24 @@
+---
+# Versione principale a cui arrivare (8, 9 o 10). Il ruolo calcola tutti i salti.
+upgrade_advisor_obiettivo: 10
+
+# Dove scrivere i rapporti, sul computer da cui si lancia Ansible.
+upgrade_advisor_cartella_rapporti: "{{ playbook_dir }}/rapporti"
+
+# Scaricare ogni volta le linee guida e le falle pubbliche di Red Hat.
+# Con false si usano le copie incluse nel ruolo e quelle del giro precedente.
+upgrade_advisor_online: true
+
+# Elenco dei salti di versione supportati da Leapp, pubblicato da Red Hat.
+upgrade_advisor_url_salti: "https://raw.githubusercontent.com/oamg/leapp-repository/main/repos/system_upgrade/common/files/upgrade_paths.json"
+upgrade_advisor_url_salti_rhel7: "https://raw.githubusercontent.com/oamg/leapp-repository/rhel-7-archived/repos/system_upgrade/common/files/upgrade_paths.json"
+
+# Tipo di installazione: default, oppure saphana per i server SAP HANA.
+upgrade_advisor_tipo: default
+
+# Falle pubbliche (Red Hat Security Data API): gravita' e giorni da guardare.
+upgrade_advisor_url_cve: "https://access.redhat.com/hydra/rest/securitydata/cve.json"
+upgrade_advisor_gravita_cve:
+  - critical
+  - important
+upgrade_advisor_giorni_cve: 30

@@ -1,0 +1,12 @@
+---
+# Consiglia, per ogni server dell'inventario, la procedura esatta di upgrade in
+# place con Leapp. Non cambia niente sui server: scrive i rapporti in ./rapporti.
+#
+#   ansible-playbook -i inventario consiglia_upgrade.yml
+#   ansible-playbook -i inventario consiglia_upgrade.yml -e upgrade_advisor_obiettivo=9
+- name: Consigli per l'upgrade in place di RHEL
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - upgrade_advisor

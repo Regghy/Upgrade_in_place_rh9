@@ -1,0 +1,12 @@
+---
+# Il ruolo non cambia niente sui server: legge, confronta e scrive un rapporto
+# sul computer da cui si lancia Ansible.
+
+- name: Raccogli i dati del server
+  ansible.builtin.import_tasks: raccogli.yml
+
+- name: Scarica le linee guida e le falle pubbliche di Red Hat
+  ansible.builtin.import_tasks: fonti.yml
+
+- name: Prepara la procedura e scrivi il rapporto
+  ansible.builtin.import_tasks: rapporto.yml

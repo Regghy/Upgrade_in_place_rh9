@@ -1,0 +1,10 @@
+# Riepilogo upgrade in place
+
+Giro del {{ ua_fonti.quando }}. Linee guida: {{ ua_fonti.salti }}. Falle: {{ ua_fonti.falle }}.
+
+| Server | Sistema | Salti | Procedura cambiata | Falle nuove | Avvisi |
+|---|---|---|---|---|---|
+{% for h in ansible_play_hosts %}
+{% set e = hostvars[h].ua_esito %}
+| [{{ h }}]({{ h }}.md) | {{ e.sistema }} | {{ e.salti | map(attribute='titolo') | join(' → ') or 'nessuno' }} | {{ 'si' if e.procedura_cambiata else 'no' }} | {{ e.novita | length }} | {{ e.avvisi | length }} |
+{% endfor %}
