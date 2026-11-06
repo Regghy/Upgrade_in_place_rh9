@@ -1,0 +1,62 @@
+---
+- hosts: all
+  become: true
+  vars:
+
+  tasks:
+   - name: mount ISO
+     shell: mount  /var/ISO/rhel-8.6-x86_64-dvd.iso /mnt
+
+   - name: package-cleanup
+     shell: package-cleanup -y --oldkernels
+
+   - name: install httpd
+     yum: 
+       name: httpd
+       state: present
+
+   - name: enable httpd
+     shell: systemctl enable --now httpd
+
+   - name: link create on Rhel86 ISO
+     shell: ln -s /mnt /var/www/html/rhel86
+
+   - name: create leapp-software dir available via http
+     shell: mkdir /var/www/html/leapp-software; chmod -R 777 /var/www/html/leapp-software
+
+   - name: enable rhel-7-server-extras-rpms
+     shell: subscription-manager repos --enable rhel-7-server-extras-rpms
+
+   - name: download leapp-upgrade
+     shell: yum --downloadonly --downloaddir=/var/www/html/leapp-software install leapp-upgrade
+
+   - name: download leapp-upgrade
+     shell: yum -y install createrepo; createrepo -v /var/www/html/leapp-software
+
+   - name: create leapp.repo file
+     template:
+      src: templates/leapp.repo
+      dest: /etc/yum.repos.d/leapp.repo
+
+   - name: chmod 777 leapp-software
+     shell: chmod -R 777 /var/www/html/leapp-software
+
+   - name: install leapp-upgrade
+     yum: 
+       name: leapp-upgrade
+       state: present
+
+   - name: create leapp_upgrade_repositories.repo file
+     template:
+      src: templates/leapp_upgrade_repositories.repo
+      dest: /etc/leapp/files/leapp_upgrade_repositories.repo
+
+#  handlers:
+#    - name: restart-NetworkManager
+#      service:
+#        name: NetworkManager
+#        state: restarted
+#    - name: restart-network
+#      service:
+#        name: network
+#        state: restarted

@@ -1,0 +1,18 @@
+---
+- hosts: all
+  become: true
+  vars:
+
+  tasks:
+   - name: leapp preupgrade
+     shell: leapp preupgrade --no-rhsm --enablerepo BaseOS --enablerepo AppStream
+     ignore_errors: true
+
+   - name: set confirm = True in the file /var/log/leapp/answerfile
+     replace:
+       path: "/var/log/leapp/answerfile"
+       regexp: '^.*\bconfirm\b.*$'
+       replace: 'confirm = True'
+
+   - name: leapp preupgrade
+     shell: leapp preupgrade --no-rhsm --enablerepo BaseOS --enablerepo AppStream

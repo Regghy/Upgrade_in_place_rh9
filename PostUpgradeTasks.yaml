@@ -1,0 +1,15 @@
+---
+- hosts: all
+  become: true
+  vars:
+
+  tasks:
+
+#   - name: stop and disable httpd
+#     shell: systemctl stop httpd; systemctl disable httpd
+
+   - name: Remove old kernels
+     shell: yum -y remove --oldinstallonly
+
+   - name: remove leapp.repo
+     shell: rm -f /etc/yum.repos.d/leapp.repo

@@ -1,0 +1,21 @@
+---
+- hosts: all
+  become: true
+  vars:
+
+  tasks:
+
+   - name: Remove old kernels
+     shell: yum -y remove --oldinstallonly
+
+   - name: leapp on dnf.conf
+     shell: sed -i 's/\<python2-leapp\>,\|\<snactor\>,\|\<leapp-upgrade-el8toel9\>,\|\<leapp\>\|\<leapp\>,//g' /etc/dnf/dnf.conf
+
+   - name: remove leapp deps
+     shell: yum remove -y leapp-deps-el9 leapp-repository-deps-el9
+
+   - name: Remove /var/www/html/leapp-software directory
+     shell: rm -rf /var/www/html/leapp-software
+
+   - name: Remove /var/www/html/rhel95 link
+     shell: rm -f /var/www/html/rhel95
